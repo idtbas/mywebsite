@@ -117,3 +117,19 @@ Roblox und Creatures of Sonaria sind Marken ihrer jeweiligen Inhaber. Es werden 
 Bilder, Modelle oder Assets aus dem Spiel verwendet. Schriften: Syncopate, Instrument
 Serif, Inter Tight, JetBrains Mono (SIL Open Font License, über Fontsource gebündelt).
 3D-Simplex-Noise nach Ashima Arts / Stefan Gustavson (MIT).
+
+---
+
+## Zweites Projekt: „Die Backrooms“ (Referat)
+
+Unter **`/backrooms/`** liegt ein zweites, völlig eigenständiges Projekt: eine scheinbar ganz
+normale studentische Referatsseite über die Backrooms.
+
+- Live (nach dem Merge auf `main`): **https://idtbas.github.io/mywebsite/backrooms/**
+- Quellcode: `public/backrooms/` – reines HTML, CSS und JavaScript ohne Abhängigkeiten.
+  Vite kopiert den Ordner beim Build unverändert nach `dist/backrooms/`.
+- Alle Abbildungen werden im Browser erzeugt (kleiner Raycaster in `js/renderer.js`),
+  es gibt keine Bilddateien und keine externen Anfragen.
+- `?reset` an die Adresse hängen, um den gespeicherten Zustand im Browser zurückzusetzen.
+
+Mehr wird hier nicht verraten. Am besten selbst ansehen – und genau hinsehen.
