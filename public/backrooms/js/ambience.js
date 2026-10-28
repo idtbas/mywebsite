@@ -6,7 +6,7 @@
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const finePointer = window.matchMedia('(pointer: fine)').matches;
 
-const HUM = [0, 0.006, 0.013, 0.024, 0.036, 0.05];
+const HUM = [0, 0.006, 0.014, 0.028, 0.045, 0.066];
 const FLICKER_EVERY = [0, 0, 45, 20, 10, 6]; // mittlere Sekunden zwischen zwei Flackern
 
 function lerpTable(t, v) {
@@ -29,6 +29,12 @@ export class Ambience {
     this.mouseInside = false;
     this.lastMouse = { x: -1, y: -1 };
     this.nextFlicker = performance.now() + 20000;
+    this.onGhostTouch = null;
+    this.lastMove = 0;
+    this.moveStart = 0;
+    this.nextStep = 0;
+    this.stepSide = 1;
+    this.stepPan = -0.6 + Math.random() * 1.2;
 
     const unlock = () => this.unlock();
     ['pointerdown', 'keydown', 'touchend'].forEach((t) => window.addEventListener(t, unlock, { passive: true }));
@@ -97,6 +103,21 @@ export class Ambience {
       wob.connect(wobGain).connect(buzzGain.gain);
 
       [buzz, low, h2, noise, wob].forEach((n) => n.start());
+      // Hall eines grossen, leeren Raums fuer die Schritte
+      const ir = ctx.createBuffer(2, ctx.sampleRate * 2.2, ctx.sampleRate);
+      for (let ch = 0; ch < 2; ch++) {
+        const data = ir.getChannelData(ch);
+        for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 3.2);
+      }
+      const verb = ctx.createConvolver();
+      verb.buffer = ir;
+      const verbGain = ctx.createGain(); verbGain.gain.value = 0.55;
+      verb.connect(verbGain).connect(ctx.destination);
+      this.stepBus = ctx.createGain();
+      this.stepBus.gain.value = 1;
+      this.stepBus.connect(ctx.destination);
+      this.stepBus.connect(verb);
+
       this.ctx = ctx;
       this.master = master;
       this.clickBuf = buf;
@@ -131,6 +152,44 @@ export class Ambience {
     }
     if (this.silenced && v < 5.5) this.silenced = false;
     if (Math.abs(before - v) > 0.01) this.applyGain(2.5);
+  }
+
+  // ein Schritt auf feuchtem Teppich, irgendwo im Raum
+  step(level) {
+    if (!this.ctx || this.silenced || document.hidden) return;
+    const ctx = this.ctx, now = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.clickBuf;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 230 + Math.random() * 120; lp.Q.value = 1.2;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, now);
+    g.gain.linearRampToValueAtTime(level, now + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+    const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+    this.stepPan = Math.max(-0.9, Math.min(0.9, this.stepPan + (Math.random() - 0.5) * 0.12));
+    src.connect(lp).connect(g);
+    if (pan) { pan.pan.value = this.stepPan; g.connect(pan).connect(this.stepBus); } else g.connect(this.stepBus);
+    src.start(now, Math.random(), 0.2);
+    // das Schleifen der Sohle
+    const scuff = ctx.createBufferSource();
+    scuff.buffer = this.clickBuf;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = 900; bp.Q.value = 0.9;
+    const sg = ctx.createGain();
+    sg.gain.setValueAtTime(0, now + 0.05);
+    sg.gain.linearRampToValueAtTime(level * 0.22, now + 0.07);
+    sg.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
+    scuff.connect(bp).connect(sg);
+    if (pan) sg.connect(pan); else sg.connect(this.stepBus);
+    scuff.start(now, Math.random(), 0.25);
+  }
+
+  // der Besucher bewegt sich (Scrollen)
+  moved() {
+    const now = performance.now();
+    if (now - this.lastMove > 1500) this.moveStart = now;
+    this.lastMove = now;
   }
 
   click() {
@@ -174,6 +233,17 @@ export class Ambience {
       this.nextFlicker = Math.max(this.nextFlicker, now + 8000);
     }
 
+    // Schritte: setzen kurz nach dir ein und hoeren kurz nach dir auf
+    if (this.ctx && this.depth >= 3.3 && this.depth < 5.97) {
+      const sinceMove = now - this.lastMove;
+      const following = this.lastMove > 0 && now - this.moveStart > 900 && sinceMove < 1700;
+      if (following && now > this.nextStep) {
+        const level = 0.05 + 0.13 * Math.min(1, (this.depth - 3.3) / 1.7);
+        this.step(level * (0.85 + Math.random() * 0.3));
+        this.nextStep = now + 560 + Math.random() * 90;
+      }
+    }
+
     // der andere Mauszeiger: spiegelt deine Bewegungen, mit Verzoegerung
     const el = this.cursorEl;
     if (el && finePointer && !reduceMotion) {
@@ -183,16 +253,19 @@ export class Ambience {
         let p = this.trail[0];
         for (let i = this.trail.length - 1; i >= 0; i--) { if (this.trail[i].t <= t) { p = this.trail[i]; break; } }
         const x = Math.min(window.innerWidth - 22, Math.max(4, window.innerWidth - p.x));
-        const y = p.y;
+        // nie direkt auf deinem eigenen Zeiger
+        const y = Math.abs(x - p.x) < 140 ? (p.y + 190) % Math.max(200, window.innerHeight - 30) : p.y;
+        if (!el.classList.contains('on')) this.cursorShownAt = now;
         el.style.transform = `translate(${x}px, ${y}px)`;
         el.classList.add('on');
         el.classList.remove('gone');
         const dx = this.lastMouse.x - x, dy = this.lastMouse.y - y;
-        if (dx * dx + dy * dy < 70 * 70) {
+        if (dx * dx + dy * dy < 70 * 70 && now - (this.cursorShownAt || now) > 1200) {
           // nicht anfassen
           el.classList.add('gone');
           el.classList.remove('on');
           this.cursorGoneUntil = now + 9000;
+          if (this.onGhostTouch) this.onGhostTouch();
         }
       } else {
         el.classList.remove('on');
