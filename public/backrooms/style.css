@@ -397,6 +397,72 @@ table.levels tbody tr:nth-child(even) { background: var(--paper); }
 
 .print-only { display: none; }
 
+/* --------------------------------------------------------- Beobachtung */
+
+.content p.whisper-in { animation: whisper-in 3.2s ease-out both; }
+@keyframes whisper-in { from { opacity: 0; } 35% { opacity: 0.25; } to { opacity: 1; } }
+
+#edge {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 46; pointer-events: none;
+  text-align: center; padding: 10px 16px; font: italic 15px/1.4 Georgia, serif;
+  color: rgba(60, 50, 24, 0.85); opacity: 0;
+}
+#edge.on { animation: edge-in 7.5s ease-in-out both; }
+@keyframes edge-in { 0% { opacity: 0; } 18% { opacity: 1; } 70% { opacity: 1; } 100% { opacity: 0; } }
+
+#presence {
+  position: fixed; top: 12px; right: 14px; z-index: 44; pointer-events: auto;
+  display: flex; align-items: center; gap: 0; opacity: 0; transition: opacity 1.4s ease;
+  font: 12px/1 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: rgba(60, 52, 30, 0.75);
+}
+#presence.on { opacity: 1; }
+#presence .pc-label { margin-right: 10px; white-space: nowrap; }
+#presence .av {
+  width: 28px; height: 28px; border-radius: 50%; display: inline-grid; place-items: center;
+  font-weight: 600; font-size: 12.5px; color: #fff; border: 2px solid rgba(255, 255, 255, 0.9);
+  margin-left: -6px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15); transition: opacity 0.12s linear;
+}
+#presence .av.me { background: #7a8794; }
+#presence .av.lena { background: #b39a3a; position: relative; }
+#presence .av.unknown { background: #2a2618; }
+#presence .av.unknown.gone { opacity: 0; }
+#presence.typing .av.lena::after {
+  content: ""; position: absolute; inset: -5px; border-radius: 50%;
+  border: 2px solid #b39a3a; animation: pulse 1.4s ease-out infinite;
+}
+@keyframes pulse { from { transform: scale(0.85); opacity: 0.9; } to { transform: scale(1.25); opacity: 0; } }
+
+.remote { color: inherit; }
+.remote-caret {
+  position: relative; display: inline-block; width: 2px; height: 1.15em; margin-left: 1px;
+  vertical-align: -0.2em; background: #b39a3a; animation: caret 1.05s steps(1) infinite;
+}
+.remote-caret::before {
+  content: attr(data-name); position: absolute; left: 0; bottom: 100%; margin-bottom: 2px;
+  background: #b39a3a; color: #fff; font: 600 10.5px/1 system-ui, sans-serif; padding: 3px 5px;
+  white-space: nowrap; border-radius: 2px 2px 2px 0; letter-spacing: 0.02em;
+}
+@keyframes caret { 50% { opacity: 0.15; } }
+
+.protokoll h2 { font-family: Georgia, serif; }
+.protokoll .proto-head { font-size: 14px; color: var(--muted); }
+.proto {
+  list-style: none; margin: 0 0 22px; padding: 14px 16px; border: 1px solid var(--rule);
+  font: 13.5px/1.75 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; color: var(--ink);
+  background: rgba(255, 250, 220, 0.18);
+}
+.proto li { display: grid; grid-template-columns: 74px 1fr; gap: 8px; }
+.proto time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.proto li.sep { display: block; color: var(--muted); margin-top: 6px; }
+.proto li.prev { display: block; color: var(--muted); opacity: 0.8; }
+.proto li.future { opacity: 0.55; }
+
+@media (max-width: 600px) {
+  #presence .pc-label { display: none; }
+  .proto { font-size: 12px; padding: 10px; }
+  .proto li { grid-template-columns: 64px 1fr; }
+}
+
 /* ------------------------------------------------------------ Responsive */
 
 @media (max-width: 1379px) {
@@ -432,6 +498,7 @@ table.levels tbody tr:nth-child(even) { background: var(--paper); }
 
 @media (prefers-reduced-motion: reduce) {
   #flicker, #other-cursor { display: none; }
+  .content p.whisper-in, #presence.typing .av.lena::after { animation: none; }
   html { transition: none; }
 }
 

@@ -7,6 +7,7 @@
 import { VARIANTS, corrupt, mishear, mutateWord, mulberry32, SUBTLE, ordinal } from './drift.js';
 import { getImage } from './images.js';
 import { Ambience } from './ambience.js';
+import { Observer, observations, typedLine, remoteType, hms } from './observer.js';
 
 const FINAL = 6;
 const GAP_VH = [130, 140, 160, 190, 230, 340];
@@ -69,7 +70,7 @@ const idle = window.requestIdleCallback ? (fn) => requestIdleCallback(fn, { time
 /* ----------------------------------------------------------------- Zustand */
 
 if (new URLSearchParams(location.search).has('reset')) {
-  ['br_visits', 'br_deep', 'br_name', 'br_last'].forEach(store.del);
+  ['br_visits', 'br_deep', 'br_name', 'br_last', 'br_obs'].forEach(store.del);
   history.replaceState(null, '', location.pathname);
 }
 if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
@@ -96,13 +97,64 @@ const state = {
   nextEdit: opened.getTime() + (4 + Math.random() * 3) * 60000,
   subtleUsed: new Set(),
   titleStep: 0,
+  usedObs: new Set(),
+  usedTyped: new Set(),
+  copyEnter: {},
+  entered: new Set(),
+  origSeconds: 0,
+  typing: false,
+  nextType: Infinity,
+  stillLogged: false,
+  stillWhisper: new Set(),
+  lastExit: 0,
+  exitOut: 0,
+  predExit: false,
+  exitResolved: false,
+  comparedShown: false,
+  readSec: null,
+  readSince: 0,
+  readGen: 0,
+  proto: null,
+  lbAt: 0,
+  devtools: false,
 };
 store.set('br_visits', state.visits);
-const saveLast = () => store.set('br_last', Date.now());
+const obs = new Observer(store);
+const saveLast = () => { store.set('br_last', Date.now()); obs.save(state.seenGen); };
 setInterval(saveLast, 15000);
 window.addEventListener('pagehide', saveLast);
 
 const amb = new Ambience();
+let lastGhostTouch = 0;
+amb.onGhostTouch = () => {
+  if (Date.now() - lastGhostTouch < 60000) return;
+  lastGhostTouch = Date.now();
+  obs.add('ghost', 'versucht, den anderen mauszeiger zu berühren.');
+};
+
+const isTouch = window.matchMedia('(pointer: coarse)').matches;
+const darkPref = window.matchMedia('(prefers-color-scheme: dark)').matches;
+const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+let battery = null;
+try {
+  if (navigator.getBattery) {
+    navigator.getBattery().then((b) => {
+      const read = () => { battery = { level: Math.round(b.level * 100), charging: b.charging }; };
+      read();
+      b.addEventListener('levelchange', read);
+      b.addEventListener('chargingchange', read);
+    }).catch(() => {});
+  }
+} catch (e) { /* kein Akku */ }
+
+const presence = document.createElement('div');
+presence.id = 'presence';
+presence.setAttribute('aria-hidden', 'true');
+document.body.appendChild(presence);
+const edgeEl = document.createElement('div');
+edgeEl.id = 'edge';
+edgeEl.setAttribute('aria-live', 'polite');
+document.body.appendChild(edgeEl);
 
 /* ----------------------------------------------------------------- Hilfen */
 
@@ -156,7 +208,9 @@ function liveValue(kind, gen) {
     case 'mins': return mins === 1 ? 'einer Minute' : `${mins} Minuten`;
     case 'name-dir': return state.name || 'dir';
     case 'name-du': return state.name || 'du';
+    case 'now-hm': return hhmm(t);
     case 'edited':
+      if (state.typing && gen >= 3 && gen < FINAL) return 'Lena H. tippt gerade …';
       if (gen === 0 || gen < 0) return state.returned ? 'gerade eben' : `${dayLabel(state.edited)}, ${hhmm(state.edited)}`;
       if (gen === 1) return `heute, ${hhmm(t)}`;
       if (gen === 2) return 'gerade eben';
@@ -409,6 +463,13 @@ function finalize(el) {
   // der Ausgang: das Original, unberuehrt. Fast.
   const g1 = el.querySelector('[data-k="ghost1"]');
   if (g1) g1.textContent = 'danke. jetzt bist du dran.';
+  // eine Quelle mehr als vorher
+  const ol = el.querySelector('.sources ol');
+  if (ol) {
+    const li = document.createElement('li');
+    li.innerHTML = `Beobachtungsprotokoll, Level 0. Subjekt: <span data-live="name-du">du</span> (${dmy(state.opened)}, ${hhmm(state.opened)}–<span data-live="now-hm"></span> Uhr). Unveröffentlicht.`;
+    ol.appendChild(li);
+  }
 }
 
 function buildCopy(gen) {
@@ -423,6 +484,10 @@ function buildCopy(gen) {
     structure(el, gen);
     applyText(el, gen);
     jitter(el, gen);
+    el.querySelectorAll('.pred').forEach((n) => n.remove());
+    addObservations(el, gen);
+    addPredictions(el, gen);
+    if (gen === 5) addProtocol(el);
   }
   addNotes(el, gen);
   renderComments(el, gen);
@@ -492,7 +557,9 @@ function setView(v) {
   amb.setDepth(state.finalSeen && v >= 5.6 ? 6 : v);
   const g = Math.min(FINAL, Math.floor(v + 1e-4));
   if (g === state.viewGen) return;
+  const prevG = state.viewGen;
   state.viewGen = g;
+  onEnterCopy(g, prevG);
   document.title = titleFor(g);
   try { history.replaceState(null, '', location.pathname + location.search + HASHES[g]); } catch (e) { /* egal */ }
   const fav = document.getElementById('favicon');
@@ -541,6 +608,7 @@ function frame() {
     if (r.top > mid) { view = g; break; }
   }
   setView(view);
+  trackReading(view);
   const fin = state.copies[FINAL];
   if (fin && !state.finalSeen && fin.getBoundingClientRect().top < innerHeight * 0.75) reachFinal();
   scrollspy(Math.floor(view));
@@ -583,6 +651,7 @@ document.addEventListener('click', (e) => {
   const copy = a.closest('.copy');
   if (!copy) return;
   const g = Number(copy.dataset.gen);
+  obs.add('link', a.classList.contains('impressum-link') ? 'öffnet das impressum. will wissen, wer dahintersteckt.' : `klickt auf „${a.textContent.trim().slice(0, 30)}“.`);
   if (a.classList.contains('impressum-link')) { e.preventDefault(); openImpressum(g); return; }
   const href = a.getAttribute('href');
   if (href && !href.startsWith('#')) return;
@@ -616,7 +685,15 @@ const lb = document.getElementById('lightbox');
 const lbImg = lb.querySelector('img');
 let lbTimer = 0;
 
-function closeLightbox() { lb.hidden = true; clearTimeout(lbTimer); }
+function closeLightbox() {
+  if (!lb.hidden && state.lbAt) {
+    const sec = Math.round((Date.now() - state.lbAt) / 1000);
+    if (sec >= 3) obs.add('look', `sieht sich die abbildung ${sec} sekunden lang an.`, { s: sec });
+  }
+  state.lbAt = 0;
+  lb.hidden = true;
+  clearTimeout(lbTimer);
+}
 
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('.fig-btn');
@@ -627,8 +704,10 @@ document.addEventListener('click', (e) => {
   const gen = genOf(fig);
   lbImg.src = img.src;
   lbImg.alt = img.alt;
-  lb.querySelector('figcaption').innerHTML = fig.querySelector('figcaption').innerHTML;
+  lb.querySelector('figcaption').innerHTML = fig.querySelector('figcaption').innerHTML + (gen === 2 ? ' <em>(Wie vorhergesagt.)</em>' : '');
   lb.hidden = false;
+  state.lbAt = Date.now();
+  obs.add('zoom', `vergrößert eine abbildung in kopie ${gen}.`, { g: gen });
   clearTimeout(lbTimer);
   const variant = fig.dataset.variant || '';
   if (gen === 0 && variant === 'a2:0') {
@@ -668,7 +747,9 @@ document.addEventListener('submit', (e) => {
   const name = form.elements.name.value.trim();
   const text = form.elements.text.value.trim();
   if (!text) return;
+  obs.add('comment', `schreibt: „${text.slice(0, 60)}“.`, { x: text.slice(0, 80) });
   if (name) {
+    if (name !== state.name) obs.add('name', `nennt sich „${name.slice(0, 40)}“.`);
     state.name = name.slice(0, 40);
     store.set('br_name', state.name);
     updateLive();
@@ -737,6 +818,16 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
   clearTimeout(hideTimer);
+  const away = Math.round((Date.now() - hiddenAt) / 1000);
+  if (hiddenAt && away >= 3) {
+    obs.add('tab', `verlässt die seite für ${away} sekunden.`, { s: away });
+    const g = state.viewGen;
+    if (g >= 2 && g < FINAL) {
+      let line = `Du warst ${away} Sekunden weg.`;
+      if (isTouch && state.predExit && !state.exitResolved) { state.exitResolved = true; line = `Du bist zurückgekommen. Nach ${away} Sekunden. Wie vorhergesagt.`; }
+      setTimeout(() => whisper(line), 1200);
+    }
+  }
   if (badge) {
     badge = false;
     visitorComment('wo warst du?');
@@ -746,8 +837,30 @@ document.addEventListener('visibilitychange', () => {
 });
 
 let lastInput = Date.now();
-['mousemove', 'keydown', 'scroll', 'touchstart', 'wheel'].forEach((t) => window.addEventListener(t, () => { lastInput = Date.now(); }, { passive: true }));
+let autoScrollAt = 0;
+['mousemove', 'keydown', 'scroll', 'touchstart', 'wheel'].forEach((t) => window.addEventListener(t, () => {
+  if (t === 'scroll' && performance.now() - autoScrollAt < 80) return;
+  lastInput = Date.now();
+  state.stillLogged = false;
+  if (t === 'scroll') amb.moved();
+}, { passive: true }));
 setInterval(() => {
+  const idleMs = Date.now() - lastInput;
+  if (idleMs > 20000 && !state.stillLogged && !document.hidden) {
+    state.stillLogged = true;
+    obs.add('still', 'bewegt sich nicht mehr.');
+    const g = state.viewGen;
+    if (g >= 3 && g < FINAL && !state.stillWhisper.has(g)) {
+      state.stillWhisper.add(g);
+      whisper('Du bewegst dich nicht mehr. Gut so. Es sieht nur, was sich bewegt.');
+    }
+  }
+  if (!isTouch && !state.devtools && (window.outerWidth - window.innerWidth > 220 || window.outerHeight - window.innerHeight > 260)) {
+    state.devtools = true;
+    obs.add('devtools', 'öffnet die entwicklerwerkzeuge. sucht eine erklärung.');
+    console.log('%cdu suchst im quelltext nach einer erklärung.', 'color: #8a7a3a; font: 13px Georgia, serif');
+    console.log('%ces gibt keine. es gibt nur dich und die seite.', 'color: #8a7a3a; font: 13px Georgia, serif');
+  }
   if (!document.hidden && Date.now() - lastInput > 40000) { driftInView(); lastInput = Date.now(); }
   if (Date.now() > state.nextEdit) {
     // jemand bearbeitet die Seite. gerade eben.
@@ -792,6 +905,7 @@ if (window.matchMedia('(pointer: fine)').matches) {
     dwell = null;
     if (node.nodeValue.slice(s, en) !== word) return;
     const m = mutateWord(word, g, rnd);
+    if (m !== word) obs.add('stare', `starrt auf das wort „${word}“, bis es sich verändert.`, { w: word });
     if (m !== word) node.nodeValue = node.nodeValue.slice(0, s) + m + node.nodeValue.slice(en);
   }, 150);
 }
@@ -815,11 +929,367 @@ document.addEventListener('copy', (e) => {
   if (!text.trim() || !e.clipboardData) return;
   const g = genOf(sel.anchorNode);
   if (g < 0) return;
+  const excerpt = text.trim().replace(/\s+/g, ' ');
+  obs.add('copy', `kopiert „${excerpt.slice(0, 40)}${excerpt.length > 40 ? '…' : ''}“.`, { x: excerpt.slice(0, 40) + (excerpt.length > 40 ? '…' : '') });
   let out = g === 0 || g === FINAL ? subtleCopy(text) : corrupt(text, Math.min(5, g + 1), rnd);
   if (g >= 3 && g < FINAL) out += '\n\n(Kopie)';
   if (out === text) return;
   e.clipboardData.setData('text/plain', out);
   e.preventDefault();
+});
+
+/* ------------------------------------------------------------ Beobachtung */
+
+const isNight = () => { const h = new Date().getHours(); return h >= 21 || h < 6; };
+const EXIT_LINES = { 1: 'noch nicht.', 2: 'noch nicht.', 3: 'du wolltest gerade gehen.', 4: 'bleib.', 5: 'dort oben ist kein ausgang.' };
+
+function obsCtx(gen) {
+  return {
+    obs, gen, name: state.name, touch: isTouch, night: isNight(), battery, dark: darkPref,
+    visits: state.visits, prevMax: obs.prev.maxGen || 0,
+    mins: Math.max(1, Math.floor((Date.now() - state.opened) / 60000)), origSeconds: state.origSeconds,
+  };
+}
+
+function contentParas(el) {
+  return $$('.content section > p', el).filter((p) => !p.classList.contains('ghost') && !p.classList.contains('thanks') &&
+    !p.classList.contains('proto-head') && p.textContent.trim().length > 25);
+}
+
+function obsPara(text, cls = 'obs') {
+  const p = document.createElement('p');
+  p.className = cls;
+  p.textContent = text;
+  return p;
+}
+
+// Saetze ueber den Besucher, als gehoerten sie zum Referat
+function addObservations(el, gen) {
+  const count = { 2: 1, 3: 2, 4: 3 }[gen] || 0;
+  if (!count) return;
+  const texts = observations(obsCtx(gen), state.usedObs, count);
+  const paras = contentParas(el).filter((p) => !p.classList.contains('obs'));
+  if (!paras.length) return;
+  texts.forEach((t, i) => {
+    const idx = Math.min(paras.length - 1, Math.floor((i + 0.3 + rnd() * 0.6) * paras.length / texts.length));
+    paras[idx].after(obsPara(t));
+  });
+}
+
+// Was die meisten als Naechstes tun
+function addPredictions(el, gen) {
+  const q = (sel) => el.querySelector(sel);
+  const add = (after, text) => { if (after) after.after(obsPara(text, 'obs pred')); };
+  if (gen === 1) add(q('[data-k="thanks"]'), 'Sie werden jetzt nach oben scrollen, um zu vergleichen.');
+  if (gen === 2) {
+    add(q('[data-k="intro1"]'), obs.has('compare')
+      ? 'Du bist vorhin nach oben gescrollt, um zu vergleichen. Genau wie vorhergesagt. Fast alle tun das.'
+      : 'Du bist nicht nach oben gescrollt, um zu vergleichen. Die meisten tun das. Du wolltest es nicht wissen.');
+    add(q('figure[data-fig="a1"]'), 'Gleich wirst du auf das Bild klicken, um es dir genauer anzusehen.');
+  }
+  if (gen === 3) {
+    const clicked = obs.all('zoom').some((e) => e.data.g === 2);
+    add(q('figure[data-fig="a1"]'), clicked
+      ? 'Du hast auf das Bild geklickt. Genau wie vorhergesagt. Du tust, was hier steht.'
+      : 'Du hast nicht auf das Bild geklickt. Du wolltest nicht sehen, wer darauf steht.');
+    add(q('[data-k="nonEuclid"]'), 'Du liest diesen Satz gerade zum zweiten Mal.');
+    add(q('[data-k="lim3"]'), isTouch
+      ? 'Irgendwann in den nächsten Minuten wirst du diese Seite verlassen wollen. Du wirst zurückkommen.'
+      : 'Irgendwann in den nächsten Minuten wirst du den Mauszeiger nach oben bewegen, zu deinen Tabs. Du wirst es dir anders überlegen.');
+    state.predExit = true;
+  }
+  if (gen === 4) {
+    const g2 = q('[data-k="ghost2"]');
+    if (g2) g2.before(obsPara('Unter diesem Absatz steht noch etwas, das man nicht sehen kann. Du wirst es gleich markieren.', 'obs pred'));
+    add(q('[data-k="fazit2"]'), 'Du musst dich nicht umdrehen. Hinter dir ist nichts. Es ist hier unten.');
+  }
+}
+
+function protoLine(e, future) {
+  const li = document.createElement('li');
+  if (future) li.className = 'future';
+  const time = document.createElement('time');
+  time.textContent = hms(e.t);
+  const span = document.createElement('span');
+  span.textContent = e.text;
+  li.append(time, span);
+  return li;
+}
+
+// Kopie 5: das Protokoll, das die ganze Zeit mitgeschrieben wurde
+function addProtocol(el) {
+  const sec = document.createElement('section');
+  sec.className = 'protokoll';
+  sec.dataset.sec = 'p';
+  sec.innerHTML = '<h2>Beobachtungsprotokoll</h2><p class="proto-head"></p><ol class="proto"></ol>';
+  sec.querySelector('.proto-head').innerHTML =
+    `Level 0 · Subjekt: <span data-live="name-du">du</span> · Besuch Nr. ${state.visits} · ${isTouch ? 'Mobilgerät' : 'Computer'}`;
+  const ol = sec.querySelector('ol');
+  if (state.visits > 1 && obs.prev.lines && obs.prev.lines.length) {
+    const head = document.createElement('li');
+    head.className = 'sep';
+    head.textContent = 'letzter besuch:';
+    ol.appendChild(head);
+    obs.prev.lines.forEach((l) => { const li = document.createElement('li'); li.className = 'prev'; li.textContent = l; ol.appendChild(li); });
+    const now = document.createElement('li');
+    now.className = 'sep';
+    now.textContent = 'heute:';
+    ol.appendChild(now);
+  }
+  obs.log.forEach((e) => ol.appendChild(protoLine(e)));
+  const fut = protoLine({ t: new Date(Date.now() + 6000), text: 'scrollt weiter nach unten.' }, true);
+  ol.appendChild(fut);
+  state.proto = { ol, fut, sec };
+  const s6 = el.querySelector('section[data-sec="6"]');
+  if (s6) s6.after(sec); else el.querySelector('.content').appendChild(sec);
+}
+
+// die naechste Zeile steht schon da, bevor es passiert
+function updateFuture() {
+  if (!state.proto) return;
+  const { fut, sec } = state.proto;
+  const r = sec.getBoundingClientRect();
+  const reading = r.top < innerHeight * 0.6 && r.bottom > innerHeight * 0.3;
+  const still = Date.now() - lastInput > 4000;
+  const text = reading ? 'liest dieses protokoll. liest jetzt diese zeile.' : still ? 'bewegt sich wieder.' : 'hört auf zu scrollen.';
+  fut.querySelector('time').textContent = hms(new Date(Date.now() + 6000));
+  fut.querySelector('span').textContent = text;
+}
+
+// ein Satz erscheint in dem Absatz, den man gerade liest
+function whisper(text) {
+  const g = state.viewGen;
+  const el = state.copies[g];
+  if (!el || g >= FINAL) { edge(text); return; }
+  const host = contentParas(el).find((p) => {
+    const r = p.getBoundingClientRect();
+    return r.bottom > innerHeight * 0.2 && r.bottom < innerHeight * 0.75;
+  });
+  if (!host) { edge(text); return; }
+  host.after(obsPara(text, 'obs whisper-in'));
+}
+
+function edge(text) {
+  edgeEl.textContent = text;
+  edgeEl.classList.remove('on');
+  void edgeEl.offsetWidth;
+  edgeEl.classList.add('on');
+}
+
+function updatePresence(g) {
+  if (g < 2 || g >= FINAL) { presence.classList.remove('on'); return; }
+  const me = `<span class="av me" title="du">${esc((state.name || 'du').slice(0, 1).toUpperCase())}</span>`;
+  const lena = '<span class="av lena" title="Lena H. · aktiv">L</span>';
+  const unknown = '<span class="av unknown" title=""></span>';
+  const rows = {
+    2: ['1 Person sieht sich diese Seite an', me],
+    3: ['2 Personen sehen sich diese Seite an', lena + me],
+    4: ['3 Personen sehen sich diese Seite an', lena + unknown + me],
+    5: ['2 Personen sehen sich diese Seite an', lena + unknown],
+  }[g];
+  presence.innerHTML = `<span class="pc-label">${rows[0]}</span>${rows[1]}`;
+  presence.classList.add('on');
+}
+
+presence.addEventListener('pointerover', (e) => {
+  const u = e.target.closest('.unknown');
+  if (u && !u.classList.contains('gone')) {
+    u.classList.add('gone');
+    obs.add('unknown', 'zeigt auf die dritte person. sie ist sofort weg.');
+  }
+});
+
+function onEnterCopy(g, prev) {
+  const now = Date.now();
+  if (prev >= 0 && g > prev) {
+    const sec = Math.round((now - (state.copyEnter[prev] || now)) / 1000);
+    if (prev >= 1 && prev < FINAL && sec < 30) obs.add('skim', `scrollt in ${sec < 2 ? 'weniger als zwei' : sec} sekunden durch kopie ${prev}.`, { g: prev, s: sec });
+  }
+  if (prev >= 0 && g > prev && g >= 1 && !state.entered.has(g)) {
+    state.entered.add(g);
+    obs.add('enter', g === FINAL ? 'erreicht den ausgang. glaubt, es sei vorbei.' : `betritt kopie ${g}.`);
+    if (g === 1 && !state.origSeconds) state.origSeconds = Math.round((now - state.opened) / 1000);
+    if (g === 3) state.nextType = now + 14000;
+  }
+  if (prev >= 1 && prev < FINAL && g < prev) {
+    obs.add('compare', 'scrollt zurück nach oben, um zu vergleichen.', { from: prev });
+    if (g === 0 && !state.comparedShown) {
+      state.comparedShown = true;
+      const t = copy0.querySelector('[data-k="thanks"]');
+      if (t) t.after(obsPara('Sehen Sie? Es ist nicht dasselbe. Es war nie dasselbe.'));
+    }
+  }
+  state.copyEnter[g] = now;
+  updatePresence(g);
+}
+
+function secTitle(s) {
+  const h = s.querySelector('h2');
+  if (!h) return '';
+  const num = h.querySelector('.num');
+  return h.textContent.slice(num ? num.textContent.length : 0).trim();
+}
+
+function trackReading(view) {
+  const g = Math.floor(view);
+  const el = view === g ? state.copies[g] : null;
+  const mid = innerHeight * 0.5;
+  let cur = null;
+  if (el) {
+    for (const s of el.querySelectorAll('.content section')) {
+      const r = s.getBoundingClientRect();
+      if (r.top <= mid && r.bottom > mid) { cur = s; break; }
+    }
+  }
+  if (cur === state.readSec) return;
+  const now = Date.now();
+  if (state.readSec) {
+    const sec = Math.round((now - state.readSince) / 1000);
+    const title = secTitle(state.readSec);
+    if (sec >= 6 && title) obs.add('read', `liest „${title}“ (${sec} s).`, { title, s: sec, g: state.readGen });
+  }
+  state.readSec = cur;
+  state.readSince = now;
+  state.readGen = g;
+}
+
+// jemand anderes schreibt in das Dokument
+setInterval(() => {
+  const g = state.viewGen;
+  const now = Date.now();
+  updateFuture();
+  // Abbildungen, die man zu lange ansieht, veraendern sich
+  if (g >= 3 && g < 5) {
+    $$('figure[data-variant]', state.copies[g]).forEach((f) => {
+      const img = f.querySelector('img');
+      if (!img || f.dataset.moved) return;
+      const r = img.getBoundingClientRect();
+      const inView = r.top > -r.height * 0.2 && r.bottom < innerHeight + r.height * 0.2;
+      if (!inView) { delete f.dataset.watch; return; }
+      if (!f.dataset.watch) { f.dataset.watch = String(now); return; }
+      if (now - Number(f.dataset.watch) > 7000) {
+        f.dataset.moved = '1';
+        const [key] = f.dataset.variant.split(':');
+        getImage(`${key}:${Math.min(5, g + 1)}`).then((u) => { img.src = u; });
+        obs.add('gaze', 'sieht eine abbildung zu lange an. auf der abbildung hat sich etwas bewegt.');
+      }
+    });
+  }
+  if (document.hidden || state.typing || g < 3 || g >= FINAL || now < state.nextType) return;
+  const host = contentParas(state.copies[g]).find((p) => {
+    const r = p.getBoundingClientRect();
+    const c = (r.top + r.bottom) / 2;
+    return c > innerHeight * 0.25 && c < innerHeight * 0.75;
+  });
+  if (!host) { state.nextType = now + 3000; return; }
+  state.typing = true;
+  remoteType(host, typedLine(obsCtx(g), state.usedTyped), 'Lena H.', (on) => {
+    state.typing = on;
+    presence.classList.toggle('typing', on);
+    updateLive();
+  });
+  state.nextType = now + (g >= 5 ? 22000 : 35000) + Math.random() * 25000;
+}, 1000);
+
+// ganz langsam tiefer, wenn man sich nicht bewegt
+let creepAcc = 0;
+function creep() {
+  const g = state.viewGen;
+  if (!reduceMotion && !document.hidden && lb.hidden && g >= 4 && g < FINAL && Date.now() - lastInput > 18000) {
+    creepAcc += 0.4;
+    if (creepAcc >= 1) {
+      autoScrollAt = performance.now();
+      window.scrollBy(0, 1);
+      creepAcc -= 1;
+    }
+  }
+  requestAnimationFrame(creep);
+}
+
+// wer gehen will
+if (!isTouch) {
+  document.addEventListener('mouseout', (e) => {
+    if (e.relatedTarget || e.clientY > 2) return;
+    const now = Date.now();
+    if (now - state.lastExit < 20000) return;
+    state.lastExit = now;
+    state.exitOut = now;
+    obs.add('exit', 'bewegt den mauszeiger zum oberen rand. will gehen.');
+    const v = state.view;
+    if (v >= 1.5 && v < 5.97) edge(EXIT_LINES[Math.min(5, Math.floor(v))]);
+  });
+  document.addEventListener('mouseover', () => {
+    if (!state.exitOut) return;
+    const away = Date.now() - state.exitOut;
+    state.exitOut = 0;
+    if (away > 30000) return;
+    obs.add('stay', 'kommt mit dem mauszeiger zurück. bleibt.');
+    const g = state.viewGen;
+    if (state.predExit && !state.exitResolved && g >= 3 && g < FINAL) {
+      state.exitResolved = true;
+      setTimeout(() => whisper('Du hast es dir anders überlegt. Genau wie vorhergesagt.'), 900);
+    }
+  });
+}
+
+let holdTimer = 0;
+window.addEventListener('touchstart', () => {
+  clearTimeout(holdTimer);
+  holdTimer = setTimeout(() => {
+    obs.add('hold', 'lässt den daumen auf dem bildschirm liegen.');
+    const g = state.viewGen;
+    if (g >= 3 && g < FINAL) whisper('Nimm den Daumen vom Bildschirm.');
+  }, 2600);
+}, { passive: true });
+['touchmove', 'touchend', 'touchcancel'].forEach((t) => window.addEventListener(t, () => clearTimeout(holdTimer), { passive: true }));
+
+window.addEventListener('keydown', (e) => {
+  const g = state.viewGen;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+    obs.add('find', 'sucht etwas auf der seite.');
+    if (g >= 2 && g < FINAL) edge('was suchst du?');
+  }
+  if (e.key === 'End') obs.add('end', 'drückt „ende“. will das ende überspringen.');
+});
+window.addEventListener('keyup', (e) => {
+  if (e.key !== 'PrintScreen') return;
+  obs.add('shot', 'macht ein bildschirmfoto.');
+  if (state.viewGen >= 2 && state.viewGen < FINAL) whisper('Ein Bildschirmfoto hilft nicht. Das Original war auch nur ein Foto.');
+});
+window.addEventListener('contextmenu', (e) => {
+  obs.add('ctx', e.target.closest('img') ? 'klickt mit rechts auf eine abbildung. will sie behalten.' : 'klickt mit der rechten maustaste.');
+});
+
+let resizeTimer = 0;
+let lastWidth = window.innerWidth;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if (Math.abs(window.innerWidth - lastWidth) < 40) return;
+    lastWidth = window.innerWidth;
+    obs.add('resize', 'verändert die fenstergröße.');
+  }, 700);
+});
+
+// wer den unsichtbaren Text markiert, bekommt eine Antwort
+let ghostSel = null;
+document.addEventListener('selectionchange', () => {
+  const sel = window.getSelection();
+  let hit = null;
+  if (sel && sel.rangeCount && !sel.isCollapsed) {
+    hit = $$('.ghost').find((gh) => { const g = genOf(gh); return g >= 3 && g < FINAL && sel.containsNode(gh, true); }) || null;
+  }
+  if (hit && hit !== ghostSel) {
+    ghostSel = hit;
+    if (!hit.dataset.seen) { hit.dataset.seen = '1'; obs.add('ghostsel', 'markiert den unsichtbaren text.'); }
+  } else if (!hit && ghostSel) {
+    const gh = ghostSel;
+    ghostSel = null;
+    if (!gh.dataset.answered) {
+      gh.dataset.answered = '1';
+      gh.textContent = `hallo, ${state.name || 'du'}. ich habe gesehen, wie du das markiert hast.`;
+    }
+  }
 });
 
 /* ------------------------------------------------------------------ Start */
@@ -828,9 +1298,21 @@ state.copies.push(copy0);
 state.gaps.push(makeGap(0));
 setImages(copy0, 0);
 
+const navEntry = performance.getEntriesByType ? performance.getEntriesByType('navigation')[0] : null;
+obs.add('open', `öffnet die seite. ${isTouch ? 'handy oder tablet' : 'computer'}, ${hhmm(opened)} uhr.`);
+if (navEntry && navEntry.type === 'reload') obs.add('reload', 'lädt die seite neu. hofft, dass alles wieder normal ist.');
+if (state.visits > 1) obs.add('return', `kommt zurück. besuch nr. ${state.visits}.`);
+obs.on((e) => {
+  if (!state.proto) return;
+  state.proto.ol.insertBefore(protoLine(e), state.proto.fut);
+});
+
 if (state.visits > 1 && state.deep) {
   const g1 = copy0.querySelector('[data-k="ghost1"]');
-  if (g1) g1.textContent = 'du warst schon einmal hier.';
+  if (g1) {
+    g1.textContent = obs.has('reload') ? 'neu laden hilft nicht.'
+      : obs.prev.maxGen ? `letztes mal bist du bis kopie ${obs.prev.maxGen} gekommen. heute kommst du weiter.` : 'du warst schon einmal hier.';
+  }
   const [from, to] = SUBTLE[Math.floor(rnd() * SUBTLE.length)];
   if (replaceInText(copy0.querySelector('.content'), from, to)) state.subtleUsed.add(from);
 }
@@ -841,6 +1323,7 @@ window.addEventListener('scroll', onScroll, { passive: true });
 window.addEventListener('resize', onScroll);
 frame();
 idle(() => prefetch(1));
+requestAnimationFrame(creep);
 
 console.log('%cDie Backrooms%c  Referat von Lena Hoffmann', 'font: 20px Georgia, serif', 'font: 12px system-ui, sans-serif; color: #5f6872');
 console.info('[referat] Abschnitte geladen: 7 von 8');

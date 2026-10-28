@@ -131,5 +131,7 @@ normale studentische Referatsseite über die Backrooms.
 - Alle Abbildungen werden im Browser erzeugt (kleiner Raycaster in `js/renderer.js`),
   es gibt keine Bilddateien und keine externen Anfragen.
 - `?reset` an die Adresse hängen, um den gespeicherten Zustand im Browser zurückzusetzen.
+- Die Seite reagiert auf das Verhalten ihrer Besucher. Alles, was sie sich merkt, bleibt im
+  `localStorage` des eigenen Browsers. Es werden keine Daten gesendet, gespeichert oder ausgewertet.
 
 Mehr wird hier nicht verraten. Am besten selbst ansehen – und genau hinsehen.
